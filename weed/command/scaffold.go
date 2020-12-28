@@ -76,10 +76,6 @@ const (
 recursive_delete = false
 # directories under this folder will be automatically creating a separate bucket
 buckets_folder = "/buckets"
-buckets_fsync = [          # a list of buckets with all write requests fsync=true
-	"important_bucket",
-	"should_always_fsync",
-]
 
 ####################################################
 # The following are filer store options
@@ -140,12 +136,23 @@ keyspace="seaweedfs"
 hosts=[
 	"localhost:9042",
 ]
+username=""
+password=""
+# This changes the data layout. Only add new directories. Removing/Updating will cause data loss.
+superLargeDirectories = []
+
+[hbase]
+enabled = false
+zkquorum = ""
+table = "seaweedfs"
 
 [redis2]
 enabled = false
 address  = "localhost:6379"
 password = ""
 database = 0
+# This changes the data layout. Only add new directories. Removing/Updating will cause data loss.
+superLargeDirectories = []
 
 [redis_cluster2]
 enabled = false
@@ -162,6 +169,8 @@ password = ""
 readOnly = true
 # automatically use the closest Redis server for reads
 routeByLatency = true
+# This changes the data layout. Only add new directories. Removing/Updating will cause data loss.
+superLargeDirectories = []
 
 [etcd]
 enabled = false
@@ -187,6 +196,28 @@ sniff_enabled = false
 healthcheck_enabled = false
 # increase the value is recommend, be sure the value in Elastic is greater or equal here
 index.max_result_window = 10000
+
+
+
+##########################
+##########################
+# To add path-specific filer store:
+#
+# 1. Add a name following the store type separated by a dot ".". E.g., cassandra.tmp
+# 2. Add a location configuraiton. E.g., location = "/tmp/"
+# 3. Copy and customize all other configurations. 
+#     Make sure they are not the same if using the same store type!
+# 4. Set enabled to true
+#
+# The following is just using cassandra as an example
+##########################
+[redis2.tmp]
+enabled = false
+location = "/tmp/"
+address  = "localhost:6379"
+password = ""
+database = 1
+
 `
 
 	NOTIFICATION_TOML_EXAMPLE = `
@@ -391,7 +422,7 @@ default = "localhost:8888"    # used by maintenance scripts if the scripts needs
 
 
 [master.sequencer]
-type = "memory"     # Choose [memory|etcd] type for storing the file id sequence
+type = "raft"     # Choose [raft|etcd] type for storing the file id sequence
 # when sequencer.type = etcd, set listen client urls of etcd cluster that store file id sequence
 # example : http://127.0.0.1:2379,http://127.0.0.1:2389
 sequencer_etcd_urls = "http://127.0.0.1:2379"

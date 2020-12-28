@@ -2,6 +2,7 @@ package seaweed.hdfs;
 
 // based on org.apache.hadoop.fs.azurebfs.services.AbfsInputStream
 
+import org.apache.hadoop.fs.ByteBufferReadable;
 import org.apache.hadoop.fs.FSExceptionMessages;
 import org.apache.hadoop.fs.FSInputStream;
 import org.apache.hadoop.fs.FileSystem.Statistics;
@@ -13,9 +14,10 @@ import seaweedfs.client.SeaweedRead;
 
 import java.io.EOFException;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.List;
 
-public class SeaweedInputStream extends FSInputStream {
+public class SeaweedInputStream extends FSInputStream implements ByteBufferReadable {
 
     private static final Logger LOG = LoggerFactory.getLogger(SeaweedInputStream.class);
 
@@ -25,7 +27,6 @@ public class SeaweedInputStream extends FSInputStream {
     private final FilerProto.Entry entry;
     private final List<SeaweedRead.VisibleInterval> visibleIntervalList;
     private final long contentLength;
-    private final int bufferSize; // default buffer size
 
     private long position = 0;  // cursor of the file
 
@@ -35,14 +36,12 @@ public class SeaweedInputStream extends FSInputStream {
             final FilerGrpcClient filerGrpcClient,
             final Statistics statistics,
             final String path,
-            final FilerProto.Entry entry,
-            final int bufferSize) throws IOException {
+            final FilerProto.Entry entry) throws IOException {
         this.filerGrpcClient = filerGrpcClient;
         this.statistics = statistics;
         this.path = path;
         this.entry = entry;
         this.contentLength = SeaweedRead.fileSize(entry);
-        this.bufferSize = bufferSize;
 
         this.visibleIntervalList = SeaweedRead.nonOverlappingVisibleIntervals(filerGrpcClient, entry.getChunksList());
 
@@ -66,14 +65,8 @@ public class SeaweedInputStream extends FSInputStream {
     }
 
     @Override
-    public synchronized int read(final byte[] b, final int off, final int len) throws IOException {
+    public int read(final byte[] b, final int off, final int len) throws IOException {
 
-        if (position < 0) {
-            throw new IllegalArgumentException("attempting to read from negative offset");
-        }
-        if (position >= contentLength) {
-            return -1;  // Hadoop prefers -1 to EOFException
-        }
         if (b == null) {
             throw new IllegalArgumentException("null byte array passed in to read() method");
         }
@@ -87,7 +80,31 @@ public class SeaweedInputStream extends FSInputStream {
             throw new IllegalArgumentException("requested read length is more than will fit after requested offset in buffer");
         }
 
-        long bytesRead = SeaweedRead.read(this.filerGrpcClient, this.visibleIntervalList, this.position, b, off, len, SeaweedRead.fileSize(entry));
+        ByteBuffer buf = ByteBuffer.wrap(b, off, len);
+        return read(buf);
+
+    }
+
+    // implement ByteBufferReadable
+    @Override
+    public synchronized int read(ByteBuffer buf) throws IOException {
+
+        if (position < 0) {
+            throw new IllegalArgumentException("attempting to read from negative offset");
+        }
+        if (position >= contentLength) {
+            return -1;  // Hadoop prefers -1 to EOFException
+        }
+
+        long bytesRead = 0;
+        int len = buf.remaining();
+        int start = (int) this.position;
+        if (start+len <= entry.getContent().size()) {
+            entry.getContent().substring(start, start+len).copyTo(buf);
+        } else {
+            bytesRead = SeaweedRead.read(this.filerGrpcClient, this.visibleIntervalList, this.position, buf, SeaweedRead.fileSize(entry));
+        }
+
         if (bytesRead > Integer.MAX_VALUE) {
             throw new IOException("Unexpected Content-Length");
         }
@@ -100,7 +117,6 @@ public class SeaweedInputStream extends FSInputStream {
         }
 
         return (int) bytesRead;
-
     }
 
     /**

@@ -1,6 +1,7 @@
 package util
 
 import (
+	"bytes"
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/base64"
@@ -141,4 +142,22 @@ func RandomInt32() int32 {
 	buf := make([]byte, 4)
 	rand.Read(buf)
 	return int32(BytesToUint32(buf))
+}
+
+func RandomBytes(byteCount int) []byte {
+	buf := make([]byte, byteCount)
+	rand.Read(buf)
+	return buf
+}
+
+type BytesReader struct {
+	Bytes []byte
+	*bytes.Reader
+}
+
+func NewBytesReader(b []byte) *BytesReader {
+	return &BytesReader{
+		Bytes:  b,
+		Reader: bytes.NewReader(b),
+	}
 }

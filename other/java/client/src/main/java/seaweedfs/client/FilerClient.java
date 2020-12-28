@@ -1,5 +1,6 @@
 package seaweedfs.client;
 
+import com.google.common.base.Strings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -272,15 +273,20 @@ public class FilerClient {
 
     public boolean createEntry(String parent, FilerProto.Entry entry) {
         try {
-            filerGrpcClient.getBlockingStub().createEntry(FilerProto.CreateEntryRequest.newBuilder()
-                    .setDirectory(parent)
-                    .setEntry(entry)
-                    .build());
+            FilerProto.CreateEntryResponse createEntryResponse =
+                    filerGrpcClient.getBlockingStub().createEntry(FilerProto.CreateEntryRequest.newBuilder()
+                            .setDirectory(parent)
+                            .setEntry(entry)
+                            .build());
+            if (Strings.isNullOrEmpty(createEntryResponse.getError())) {
+                return true;
+            }
+            LOG.warn("createEntry {}/{} error: {}", parent, entry.getName(), createEntryResponse.getError());
+            return false;
         } catch (Exception e) {
             LOG.warn("createEntry {}/{}: {}", parent, entry.getName(), e);
             return false;
         }
-        return true;
     }
 
     public boolean updateEntry(String parent, FilerProto.Entry entry) {
@@ -290,7 +296,7 @@ public class FilerClient {
                     .setEntry(entry)
                     .build());
         } catch (Exception e) {
-            LOG.warn("createEntry {}/{}: {}", parent, entry.getName(), e);
+            LOG.warn("updateEntry {}/{}: {}", parent, entry.getName(), e);
             return false;
         }
         return true;
@@ -325,6 +331,15 @@ public class FilerClient {
             return false;
         }
         return true;
+    }
+
+    public Iterator<FilerProto.SubscribeMetadataResponse> watch(String prefix, String clientName, long sinceNs) {
+        return filerGrpcClient.getBlockingStub().subscribeMetadata(FilerProto.SubscribeMetadataRequest.newBuilder()
+                .setPathPrefix(prefix)
+                .setClientName(clientName)
+                .setSinceNs(sinceNs)
+                .build()
+        );
     }
 
 }

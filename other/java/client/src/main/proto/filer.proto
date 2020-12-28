@@ -37,6 +37,9 @@ service SeaweedFiler {
     rpc LookupVolume (LookupVolumeRequest) returns (LookupVolumeResponse) {
     }
 
+    rpc CollectionList (CollectionListRequest) returns (CollectionListResponse) {
+    }
+
     rpc DeleteCollection (DeleteCollectionRequest) returns (DeleteCollectionResponse) {
     }
 
@@ -95,6 +98,9 @@ message Entry {
     repeated FileChunk chunks = 3;
     FuseAttributes attributes = 4;
     map<string, bytes> extended = 5;
+    bytes hard_link_id = 7;
+    int32 hard_link_counter = 8; // only exists in hard link meta data
+    bytes content = 9; // if not empty, the file content
 }
 
 message FullEntry {
@@ -212,7 +218,8 @@ message AssignVolumeRequest {
     string replication = 3;
     int32 ttl_sec = 4;
     string data_center = 5;
-    string parent_path = 6;
+    string path = 6;
+    string rack = 7;
 }
 
 message AssignVolumeResponse {
@@ -242,6 +249,16 @@ message LookupVolumeResponse {
     map<string, Locations> locations_map = 1;
 }
 
+message Collection {
+    string name = 1;
+}
+message CollectionListRequest {
+    bool include_normal_volumes = 1;
+    bool include_ec_volumes = 2;
+}
+message CollectionListResponse {
+    repeated Collection collections = 1;
+}
 message DeleteCollectionRequest {
     string collection = 1;
 }
@@ -273,6 +290,8 @@ message GetFilerConfigurationResponse {
     string dir_buckets = 5;
     bool cipher = 7;
     int32 signature = 8;
+    string metrics_address = 9;
+    int32 metrics_interval_sec = 10;
 }
 
 message SubscribeMetadataRequest {
@@ -329,4 +348,24 @@ message KvPutRequest {
 }
 message KvPutResponse {
     string error = 1;
+}
+
+// path-based configurations
+message FilerConf {
+    int32 version = 1;
+    message PathConf {
+        string location_prefix = 1;
+        string collection = 2;
+        string replication = 3;
+        string ttl = 4;
+        enum DiskType {
+            NONE = 0;
+            HDD = 1;
+            SSD = 2;
+        }
+        DiskType disk_type = 5;
+        bool fsync = 6;
+        uint32 volume_growth_count = 7;
+    }
+    repeated PathConf locations = 2;
 }

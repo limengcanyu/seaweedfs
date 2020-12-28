@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/glog"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/chrislusf/seaweedfs/weed/filer"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	xhttp "github.com/chrislusf/seaweedfs/weed/s3api/http"
+	"github.com/chrislusf/seaweedfs/weed/s3api/s3err"
 )
 
 type ListBucketResultV2 struct {
@@ -41,11 +44,11 @@ func (s3a *S3ApiServer) ListObjectsV2Handler(w http.ResponseWriter, r *http.Requ
 	originalPrefix, continuationToken, startAfter, delimiter, _, maxKeys := getListObjectsV2Args(r.URL.Query())
 
 	if maxKeys < 0 {
-		writeErrorResponse(w, ErrInvalidMaxKeys, r.URL)
+		writeErrorResponse(w, s3err.ErrInvalidMaxKeys, r.URL)
 		return
 	}
 	if delimiter != "" && delimiter != "/" {
-		writeErrorResponse(w, ErrNotImplemented, r.URL)
+		writeErrorResponse(w, s3err.ErrNotImplemented, r.URL)
 		return
 	}
 
@@ -57,7 +60,7 @@ func (s3a *S3ApiServer) ListObjectsV2Handler(w http.ResponseWriter, r *http.Requ
 	response, err := s3a.listFilerEntries(bucket, originalPrefix, maxKeys, marker, delimiter)
 
 	if err != nil {
-		writeErrorResponse(w, ErrInternalError, r.URL)
+		writeErrorResponse(w, s3err.ErrInternalError, r.URL)
 		return
 	}
 	responseV2 := &ListBucketResultV2{
@@ -88,18 +91,18 @@ func (s3a *S3ApiServer) ListObjectsV1Handler(w http.ResponseWriter, r *http.Requ
 	originalPrefix, marker, delimiter, maxKeys := getListObjectsV1Args(r.URL.Query())
 
 	if maxKeys < 0 {
-		writeErrorResponse(w, ErrInvalidMaxKeys, r.URL)
+		writeErrorResponse(w, s3err.ErrInvalidMaxKeys, r.URL)
 		return
 	}
 	if delimiter != "" && delimiter != "/" {
-		writeErrorResponse(w, ErrNotImplemented, r.URL)
+		writeErrorResponse(w, s3err.ErrNotImplemented, r.URL)
 		return
 	}
 
 	response, err := s3a.listFilerEntries(bucket, originalPrefix, maxKeys, marker, delimiter)
 
 	if err != nil {
-		writeErrorResponse(w, ErrInternalError, r.URL)
+		writeErrorResponse(w, s3err.ErrInternalError, r.URL)
 		return
 	}
 
@@ -136,6 +139,10 @@ func (s3a *S3ApiServer) listFilerEntries(bucket string, originalPrefix string, m
 					})
 				}
 			} else {
+				storageClass := "STANDARD"
+				if v, ok := entry.Extended[xhttp.AmzStorageClass]; ok {
+					storageClass = string(v)
+				}
 				contents = append(contents, ListEntry{
 					Key:          fmt.Sprintf("%s/%s", dir, entry.Name)[len(bucketPrefix):],
 					LastModified: time.Unix(entry.Attributes.Mtime, 0).UTC(),
@@ -145,7 +152,7 @@ func (s3a *S3ApiServer) listFilerEntries(bucket string, originalPrefix string, m
 						ID:          fmt.Sprintf("%x", entry.Attributes.Uid),
 						DisplayName: entry.Attributes.UserName,
 					},
-					StorageClass: "STANDARD",
+					StorageClass: StorageClass(storageClass),
 				})
 			}
 		})
@@ -191,11 +198,12 @@ func (s3a *S3ApiServer) doListFilerEntries(client filer_pb.SeaweedFilerClient, d
 		sepIndex := strings.Index(marker, "/")
 		subDir, subMarker := marker[0:sepIndex], marker[sepIndex+1:]
 		// println("doListFilerEntries dir", dir+"/"+subDir, "subMarker", subMarker, "maxKeys", maxKeys)
-		subCounter, _, subNextMarker, subErr := s3a.doListFilerEntries(client, dir+"/"+subDir, "", maxKeys, subMarker, delimiter, eachEntryFn)
+		subCounter, subIsTruncated, subNextMarker, subErr := s3a.doListFilerEntries(client, dir+"/"+subDir, "", maxKeys, subMarker, delimiter, eachEntryFn)
 		if subErr != nil {
 			err = subErr
 			return
 		}
+		isTruncated = isTruncated || subIsTruncated
 		maxKeys -= subCounter
 		nextMarker = subDir + "/" + subNextMarker
 		counter += subCounter
@@ -239,8 +247,8 @@ func (s3a *S3ApiServer) doListFilerEntries(client filer_pb.SeaweedFilerClient, d
 		if entry.IsDirectory {
 			// println("ListEntries", dir, "dir:", entry.Name)
 			if entry.Name != ".uploads" { // FIXME no need to apply to all directories. this extra also affects maxKeys
-				eachEntryFn(dir, entry)
 				if delimiter != "/" {
+					eachEntryFn(dir, entry)
 					// println("doListFilerEntries2 dir", dir+"/"+entry.Name, "maxKeys", maxKeys-counter)
 					subCounter, subIsTruncated, subNextMarker, subErr := s3a.doListFilerEntries(client, dir+"/"+entry.Name, "", maxKeys-counter, "", delimiter, eachEntryFn)
 					if subErr != nil {
@@ -255,7 +263,16 @@ func (s3a *S3ApiServer) doListFilerEntries(client filer_pb.SeaweedFilerClient, d
 						return
 					}
 				} else {
-					counter++
+					var isEmpty bool
+					if !s3a.option.AllowEmptyFolder {
+						if isEmpty, err = s3a.isDirectoryAllEmpty(client, dir, entry.Name); err != nil {
+							glog.Errorf("check empty folder %s: %v", dir, err)
+						}
+					}
+					if !isEmpty {
+						eachEntryFn(dir, entry)
+						counter++
+					}
 				}
 			}
 		} else {
@@ -291,4 +308,58 @@ func getListObjectsV1Args(values url.Values) (prefix, marker, delimiter string, 
 		maxkeys = maxObjectListSizeLimit
 	}
 	return
+}
+
+func (s3a *S3ApiServer) isDirectoryAllEmpty(filerClient filer_pb.SeaweedFilerClient, parentDir, name string) (isEmpty bool, err error) {
+	// println("+ isDirectoryAllEmpty", dir, name)
+	glog.V(4).Infof("+ isEmpty %s/%s", parentDir, name)
+	defer glog.V(4).Infof("- isEmpty %s/%s %v", parentDir, name, isEmpty)
+	var fileCounter int
+	var subDirs []string
+	currentDir := parentDir + "/" + name
+	var startFrom string
+	var isExhausted bool
+	var foundEntry bool
+	for fileCounter == 0 && !isExhausted && err == nil {
+		err = filer_pb.SeaweedList(filerClient, currentDir, "", func(entry *filer_pb.Entry, isLast bool) error {
+			foundEntry = true
+			if entry.IsDirectory {
+				subDirs = append(subDirs, entry.Name)
+			} else {
+				fileCounter++
+			}
+			startFrom = entry.Name
+			isExhausted = isExhausted || isLast
+			glog.V(4).Infof("    * %s/%s isLast: %t", currentDir, startFrom, isLast)
+			return nil
+		}, startFrom, false, 8)
+		if !foundEntry {
+			break
+		}
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	if fileCounter > 0 {
+		return false, nil
+	}
+
+	for _, subDir := range subDirs {
+		isSubEmpty, subErr := s3a.isDirectoryAllEmpty(filerClient, currentDir, subDir)
+		if subErr != nil {
+			return false, subErr
+		}
+		if !isSubEmpty {
+			return false, nil
+		}
+	}
+
+	glog.V(1).Infof("deleting empty folder %s", currentDir)
+	if err = doDeleteEntry(filerClient, parentDir, name, true, true); err != nil {
+		return
+	}
+
+	return true, nil
 }

@@ -3,7 +3,6 @@ package weed_server
 import (
 	"context"
 	"fmt"
-
 	"github.com/chrislusf/raft"
 
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
@@ -179,12 +178,15 @@ func (ms *MasterServer) LookupEcVolume(ctx context.Context, req *master_pb.Looku
 	return resp, nil
 }
 
-func (ms *MasterServer) GetMasterConfiguration(ctx context.Context, req *master_pb.GetMasterConfigurationRequest) (*master_pb.GetMasterConfigurationResponse, error) {
+func (ms *MasterServer) VacuumVolume(ctx context.Context, req *master_pb.VacuumVolumeRequest) (*master_pb.VacuumVolumeResponse, error) {
 
-	resp := &master_pb.GetMasterConfigurationResponse{
-		MetricsAddress:         ms.option.MetricsAddress,
-		MetricsIntervalSeconds: uint32(ms.option.MetricsIntervalSec),
+	if !ms.Topo.IsLeader() {
+		return nil, raft.NotLeaderError
 	}
+
+	resp := &master_pb.VacuumVolumeResponse{}
+
+	ms.Topo.Vacuum(ms.grpcDialOption, float64(req.GarbageThreshold), ms.preallocateSize)
 
 	return resp, nil
 }

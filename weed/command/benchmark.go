@@ -125,7 +125,7 @@ func runBenchmark(cmd *Command, args []string) bool {
 		defer pprof.StopCPUProfile()
 	}
 
-	b.masterClient = wdclient.NewMasterClient(b.grpcDialOption, "client", "", 0, strings.Split(*b.masters, ","))
+	b.masterClient = wdclient.NewMasterClient(b.grpcDialOption, "client", "", 0, "", strings.Split(*b.masters, ","))
 	go b.masterClient.KeepConnectedToMaster()
 	b.masterClient.WaitUntilConnected()
 
@@ -282,14 +282,19 @@ func readFiles(fileIdLineChan chan string, s *stat) {
 		start := time.Now()
 		var bytesRead int
 		var err error
-		url, err := b.masterClient.LookupFileId(fid)
+		urls, err := b.masterClient.LookupFileId(fid)
 		if err != nil {
 			s.failed++
 			println("!!!! ", fid, " location not found!!!!!")
 			continue
 		}
 		var bytes []byte
-		bytes, err = util.Get(url)
+		for _, url := range urls {
+			bytes, _, err = util.Get(url)
+			if err == nil {
+				break
+			}
+		}
 		bytesRead = len(bytes)
 		if err == nil {
 			s.completed++

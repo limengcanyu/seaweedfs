@@ -93,6 +93,10 @@ func (vs *VolumeServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request)
 	} else if hasEcVolume {
 		count, err = vs.store.ReadEcShardNeedle(volumeId, n)
 	}
+	if err != nil && err != storage.ErrorDeleted && r.FormValue("type") != "replicate" && hasVolume {
+		glog.V(4).Infof("read needle: %v", err)
+		// start to fix it from other replicas, if not deleted and hasVolume and is not a replicated request
+	}
 	// glog.V(4).Infoln("read bytes", count, "error", err)
 	if err != nil || count < 0 {
 		glog.V(3).Infof("read %s isNormalVolume %v error: %v", r.URL.Path, hasVolume, err)
@@ -155,8 +159,8 @@ func (vs *VolumeServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request)
 			if n.Data, err = util.DecompressData(n.Data); err != nil {
 				glog.V(0).Infoln("ungzip error:", err, r.URL.Path)
 			}
-		} else if strings.Contains(r.Header.Get("Accept-Encoding"), "zstd") && util.IsZstdContent(n.Data) {
-			w.Header().Set("Content-Encoding", "zstd")
+			// } else if strings.Contains(r.Header.Get("Accept-Encoding"), "zstd") && util.IsZstdContent(n.Data) {
+			//	w.Header().Set("Content-Encoding", "zstd")
 		} else if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && util.IsGzippedContent(n.Data) {
 			w.Header().Set("Content-Encoding", "gzip")
 		} else {

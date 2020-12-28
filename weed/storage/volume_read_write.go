@@ -16,6 +16,20 @@ import (
 )
 
 var ErrorNotFound = errors.New("not found")
+var ErrorDeleted = errors.New("already deleted")
+var ErrorSizeMismatch = errors.New("size mismatch")
+
+func (v *Volume) checkReadWriteError(err error) {
+	if err == nil {
+		if v.lastIoError != nil {
+			v.lastIoError = nil
+		}
+		return
+	}
+	if err.Error() == "input/output error" {
+		v.lastIoError = err
+	}
+}
 
 // isFileUnchanged checks whether this needle to write is same as last one.
 // It requires serialized access in the same volume.
@@ -54,14 +68,25 @@ func (v *Volume) Destroy() (err error) {
 		}
 	}
 	v.Close()
-	os.Remove(v.FileName() + ".dat")
-	os.Remove(v.FileName() + ".idx")
-	os.Remove(v.FileName() + ".vif")
-	os.Remove(v.FileName() + ".sdx")
-	os.Remove(v.FileName() + ".cpd")
-	os.Remove(v.FileName() + ".cpx")
-	os.RemoveAll(v.FileName() + ".ldb")
+	removeVolumeFiles(v.DataFileName())
+	removeVolumeFiles(v.IndexFileName())
 	return
+}
+
+func removeVolumeFiles(filename string) {
+	// basic
+	os.Remove(filename + ".dat")
+	os.Remove(filename + ".idx")
+	os.Remove(filename + ".vif")
+	// sorted index file
+	os.Remove(filename + ".sdx")
+	// compaction
+	os.Remove(filename + ".cpd")
+	os.Remove(filename + ".cpx")
+	// level db indx file
+	os.RemoveAll(filename + ".ldb")
+	// marker for damaged or incomplete volume
+	os.Remove(filename + ".note")
 }
 
 func (v *Volume) asyncRequestAppend(request *needle.AsyncRequest) {
@@ -102,7 +127,9 @@ func (v *Volume) syncWrite(n *needle.Needle) (offset uint64, size Size, isUnchan
 
 	// append to dat file
 	n.AppendAtNs = uint64(time.Now().UnixNano())
-	if offset, size, _, err = n.Append(v.DataBackend, v.Version()); err != nil {
+	offset, size, _, err = n.Append(v.DataBackend, v.Version())
+	v.checkReadWriteError(err)
+	if err != nil {
 		return
 	}
 
@@ -166,7 +193,9 @@ func (v *Volume) doWriteRequest(n *needle.Needle) (offset uint64, size Size, isU
 
 	// append to dat file
 	n.AppendAtNs = uint64(time.Now().UnixNano())
-	if offset, size, _, err = n.Append(v.DataBackend, v.Version()); err != nil {
+	offset, size, _, err = n.Append(v.DataBackend, v.Version())
+	v.checkReadWriteError(err)
+	if err != nil {
 		return
 	}
 	v.lastAppendAtNs = n.AppendAtNs
@@ -184,7 +213,7 @@ func (v *Volume) doWriteRequest(n *needle.Needle) (offset uint64, size Size, isU
 }
 
 func (v *Volume) syncDelete(n *needle.Needle) (Size, error) {
-	glog.V(4).Infof("delete needle %s", needle.NewFileIdFromNeedle(v.Id, n).String())
+	// glog.V(4).Infof("delete needle %s", needle.NewFileIdFromNeedle(v.Id, n).String())
 	actualSize := needle.GetActualSize(0, v.Version())
 	v.dataFileAccessLock.Lock()
 	defer v.dataFileAccessLock.Unlock()
@@ -200,12 +229,13 @@ func (v *Volume) syncDelete(n *needle.Needle) (Size, error) {
 		size := nv.Size
 		n.Data = nil
 		n.AppendAtNs = uint64(time.Now().UnixNano())
-		_, _, _, err := n.Append(v.DataBackend, v.Version())
+		offset, _, _, err := n.Append(v.DataBackend, v.Version())
+		v.checkReadWriteError(err)
 		if err != nil {
 			return size, err
 		}
 		v.lastAppendAtNs = n.AppendAtNs
-		if err = v.nm.Delete(n.Id); err != nil {
+		if err = v.nm.Delete(n.Id, ToOffset(int64(offset))); err != nil {
 			return size, err
 		}
 		return size, err
@@ -238,12 +268,13 @@ func (v *Volume) doDeleteRequest(n *needle.Needle) (Size, error) {
 		size := nv.Size
 		n.Data = nil
 		n.AppendAtNs = uint64(time.Now().UnixNano())
-		_, _, _, err := n.Append(v.DataBackend, v.Version())
+		offset, _, _, err := n.Append(v.DataBackend, v.Version())
+		v.checkReadWriteError(err)
 		if err != nil {
 			return size, err
 		}
 		v.lastAppendAtNs = n.AppendAtNs
-		if err = v.nm.Delete(n.Id); err != nil {
+		if err = v.nm.Delete(n.Id, ToOffset(int64(offset))); err != nil {
 			return size, err
 		}
 		return size, err
@@ -263,16 +294,20 @@ func (v *Volume) readNeedle(n *needle.Needle, readOption *ReadOption) (int, erro
 	readSize := nv.Size
 	if readSize.IsDeleted() {
 		if readOption != nil && readOption.ReadDeleted && readSize != TombstoneFileSize {
-			glog.V(3).Infof("reading deleted %s size %d", n.String(), readSize)
+			glog.V(3).Infof("reading deleted %s", n.String())
 			readSize = -readSize
 		} else {
-			return -1, errors.New("already deleted")
+			return -1, ErrorDeleted
 		}
 	}
 	if readSize == 0 {
 		return 0, nil
 	}
 	err := n.ReadData(v.DataBackend, nv.Offset.ToAcutalOffset(), readSize, v.Version())
+	if err == needle.ErrorSizeMismatch && OffsetSize == 4 {
+		err = n.ReadData(v.DataBackend, nv.Offset.ToAcutalOffset()+int64(MaxPossibleVolumeSize), readSize, v.Version())
+	}
+	v.checkReadWriteError(err)
 	if err != nil {
 		return 0, err
 	}
@@ -287,7 +322,7 @@ func (v *Volume) readNeedle(n *needle.Needle, readOption *ReadOption) (int, erro
 	if !n.HasLastModifiedDate() {
 		return bytesRead, nil
 	}
-	if uint64(time.Now().Unix()) < n.LastModified+uint64(ttlMinutes*60) {
+	if time.Now().Before(time.Unix(0, int64(n.AppendAtNs)).Add(time.Duration(ttlMinutes) * time.Minute)) {
 		return bytesRead, nil
 	}
 	return -1, ErrorNotFound
@@ -381,10 +416,8 @@ func ScanVolumeFile(dirname string, collection string, id needle.VolumeId,
 	if v, err = loadVolumeWithoutIndex(dirname, collection, id, needleMapKind); err != nil {
 		return fmt.Errorf("failed to load volume %d: %v", id, err)
 	}
-	if v.volumeInfo.Version == 0 {
-		if err = volumeFileScanner.VisitSuperBlock(v.SuperBlock); err != nil {
-			return fmt.Errorf("failed to process volume %d super block: %v", id, err)
-		}
+	if err = volumeFileScanner.VisitSuperBlock(v.SuperBlock); err != nil {
+		return fmt.Errorf("failed to process volume %d super block: %v", id, err)
 	}
 	defer v.Close()
 
@@ -406,8 +439,9 @@ func ScanVolumeFileFrom(version needle.Version, datBackend backend.BackendStorag
 	for n != nil {
 		var needleBody []byte
 		if volumeFileScanner.ReadNeedleBody() {
+			// println("needle", n.Id.String(), "offset", offset, "size", n.Size, "rest", rest)
 			if needleBody, err = n.ReadNeedleBody(datBackend, version, offset+NeedleHeaderSize, rest); err != nil {
-				glog.V(0).Infof("cannot read needle body: %v", err)
+				glog.V(0).Infof("cannot read needle head [%d, %d) body [%d, %d) body length %d: %v", offset, offset+NeedleHeaderSize, offset+NeedleHeaderSize, offset+NeedleHeaderSize+rest, rest, err)
 				// err = fmt.Errorf("cannot read needle body: %v", err)
 				// return
 			}

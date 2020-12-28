@@ -102,6 +102,12 @@ func (c *commandVolumeFsck) Do(args []string, commandEnv *CommandEnv, writer io.
 		totalOrphanChunkCount += uint64(len(orphanFileIds))
 		totalOrphanDataSize += orphanDataSize
 
+		if *verbose {
+			for _, fid := range orphanFileIds {
+				fmt.Fprintf(writer, "%sxxxxxxxx\n", fid)
+			}
+		}
+
 		if *applyPurging && len(orphanFileIds) > 0 {
 			if vinfo.isEcVolume {
 				fmt.Fprintf(writer, "Skip purging for Erasure Coded volumes.\n")
@@ -151,12 +157,12 @@ func (c *commandVolumeFsck) collectOneVolumeFileIds(tempFolder string, volumeId 
 			IgnoreSourceFileNotFound: false,
 		})
 		if err != nil {
-			return fmt.Errorf("failed to start copying volume %d.idx: %v", volumeId, err)
+			return fmt.Errorf("failed to start copying volume %d%s: %v", volumeId, ext, err)
 		}
 
 		err = writeToFile(copyFileClient, getVolumeFileIdFile(tempFolder, volumeId))
 		if err != nil {
-			return fmt.Errorf("failed to copy %d.idx from %s: %v", volumeId, vinfo.server, err)
+			return fmt.Errorf("failed to copy %d%s from %s: %v", volumeId, ext, vinfo.server, err)
 		}
 
 		return nil

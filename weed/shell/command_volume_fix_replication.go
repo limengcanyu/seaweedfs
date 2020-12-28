@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"github.com/chrislusf/seaweedfs/weed/storage/needle"
 	"io"
@@ -50,10 +51,13 @@ func (c *commandVolumeFixReplication) Do(args []string, commandEnv *CommandEnv, 
 		return
 	}
 
-	takeAction := true
-	if len(args) > 0 && args[0] == "-n" {
-		takeAction = false
+	volFixReplicationCommand := flag.NewFlagSet(c.Name(), flag.ContinueOnError)
+	skipChange := volFixReplicationCommand.Bool("n", false, "skip the changes")
+	if err = volFixReplicationCommand.Parse(args); err != nil {
+		return nil
 	}
+
+	takeAction := !*skipChange
 
 	var resp *master_pb.VolumeListResponse
 	err = commandEnv.MasterClient.WithClient(func(client master_pb.SeaweedClient) error {
@@ -365,18 +369,20 @@ func countReplicas(replicas []*VolumeReplica) (diffDc, diffRack, diffNode map[st
 
 func pickOneReplicaToDelete(replicas []*VolumeReplica, replicaPlacement *super_block.ReplicaPlacement) *VolumeReplica {
 
-	allSame := true
-	oldest := replicas[0]
-	for _, replica := range replicas {
-		if replica.info.ModifiedAtSecond < oldest.info.ModifiedAtSecond {
-			oldest = replica
-			allSame = false
+	sort.Slice(replicas, func(i, j int) bool {
+		a, b := replicas[i], replicas[j]
+		if a.info.CompactRevision != b.info.CompactRevision {
+			return a.info.CompactRevision < b.info.CompactRevision
 		}
-	}
-	if !allSame {
-		return oldest
-	}
+		if a.info.ModifiedAtSecond != b.info.ModifiedAtSecond {
+			return a.info.ModifiedAtSecond < b.info.ModifiedAtSecond
+		}
+		if a.info.Size != b.info.Size {
+			return a.info.Size < b.info.Size
+		}
+		return false
+	})
 
-	// TODO what if all the replicas have the same timestamp?
-	return oldest
+	return replicas[0]
+
 }

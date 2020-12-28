@@ -5,7 +5,6 @@ package command
 import (
 	"context"
 	"fmt"
-	"github.com/chrislusf/seaweedfs/weed/filesys/meta_cache"
 	"os"
 	"os/user"
 	"path"
@@ -13,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/chrislusf/seaweedfs/weed/filesys/meta_cache"
 
 	"github.com/seaweedfs/fuse"
 	"github.com/seaweedfs/fuse/fs"
@@ -29,6 +30,10 @@ import (
 func runMount(cmd *Command, args []string) bool {
 
 	grace.SetupProfiling(*mountCpuProfile, *mountMemProfile)
+	if *mountReadRetryTime < time.Second {
+		*mountReadRetryTime = time.Second
+	}
+	util.RetryWaitTime = *mountReadRetryTime
 
 	umask, umaskErr := strconv.ParseUint(*mountOptions.umaskString, 8, 64)
 	if umaskErr != nil {
@@ -87,14 +92,14 @@ func RunMount(option *MountOptions, umask os.FileMode) bool {
 
 	fuse.Unmount(dir)
 
-	uid, gid := uint32(0), uint32(0)
-
 	// detect mount folder mode
 	if *option.dirAutoCreate {
-		os.MkdirAll(dir, 0755)
+		os.MkdirAll(dir, os.FileMode(0777)&^umask)
 	}
-	mountMode := os.ModeDir | 0755
 	fileInfo, err := os.Stat(dir)
+
+	uid, gid := uint32(0), uint32(0)
+	mountMode := os.ModeDir | 0777
 	if err == nil {
 		mountMode = os.ModeDir | fileInfo.Mode()
 		uid, gid = util.GetFileUidGid(fileInfo)
@@ -170,6 +175,7 @@ func RunMount(option *MountOptions, umask os.FileMode) bool {
 		Replication:                 *option.replication,
 		TtlSec:                      int32(*option.ttlSec),
 		ChunkSizeLimit:              int64(chunkSizeLimitMB) * 1024 * 1024,
+		ConcurrentWriters:           *option.concurrentWriters,
 		CacheDir:                    *option.cacheDir,
 		CacheSizeMB:                 *option.cacheSizeMB,
 		DataCenter:                  *option.dataCenter,

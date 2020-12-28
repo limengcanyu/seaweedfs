@@ -31,6 +31,7 @@ type Option struct {
 	Replication        string
 	TtlSec             int32
 	ChunkSizeLimit     int64
+	ConcurrentWriters  int
 	CacheDir           string
 	CacheSizeMB        int64
 	DataCenter         string
@@ -68,6 +69,9 @@ type WFS struct {
 	chunkCache *chunk_cache.TieredChunkCache
 	metaCache  *meta_cache.MetaCache
 	signature  int32
+
+	// throttle writers
+	concurrentWriters *util.LimitedConcurrentExecutor
 }
 type statsCache struct {
 	filer_pb.StatisticsResponse
@@ -88,19 +92,31 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 	cacheUniqueId := util.Md5String([]byte(option.FilerGrpcAddress + option.FilerMountRootPath + util.Version()))[0:4]
 	cacheDir := path.Join(option.CacheDir, cacheUniqueId)
 	if option.CacheSizeMB > 0 {
-		os.MkdirAll(cacheDir, 0755)
-		wfs.chunkCache = chunk_cache.NewTieredChunkCache(256, cacheDir, option.CacheSizeMB)
+		os.MkdirAll(cacheDir, os.FileMode(0777)&^option.Umask)
+		wfs.chunkCache = chunk_cache.NewTieredChunkCache(256, cacheDir, option.CacheSizeMB, 1024*1024)
 	}
 
-	wfs.metaCache = meta_cache.NewMetaCache(path.Join(cacheDir, "meta"), option.UidGidMapper)
+	wfs.metaCache = meta_cache.NewMetaCache(path.Join(cacheDir, "meta"), util.FullPath(option.FilerMountRootPath), option.UidGidMapper, func(filePath util.FullPath) {
+		fsNode := wfs.fsNodeCache.GetFsNode(filePath)
+		if fsNode != nil {
+			if file, ok := fsNode.(*File); ok {
+				file.clearEntry()
+			}
+		}
+	})
 	startTime := time.Now()
 	go meta_cache.SubscribeMetaEvents(wfs.metaCache, wfs.signature, wfs, wfs.option.FilerMountRootPath, startTime.UnixNano())
 	grace.OnInterrupt(func() {
 		wfs.metaCache.Shutdown()
 	})
 
-	wfs.root = &Dir{name: wfs.option.FilerMountRootPath, wfs: wfs}
+	entry, _ := filer_pb.GetEntry(wfs, util.FullPath(wfs.option.FilerMountRootPath))
+	wfs.root = &Dir{name: wfs.option.FilerMountRootPath, wfs: wfs, entry: entry}
 	wfs.fsNodeCache = newFsCache(wfs.root)
+
+	if wfs.option.ConcurrentWriters > 0 {
+		wfs.concurrentWriters = util.NewLimitedConcurrentExecutor(wfs.option.ConcurrentWriters)
+	}
 
 	return wfs
 }
@@ -118,10 +134,12 @@ func (wfs *WFS) AcquireHandle(file *File, uid, gid uint32) (fileHandle *FileHand
 	defer wfs.handlesLock.Unlock()
 
 	inodeId := file.fullpath().AsInode()
-	existingHandle, found := wfs.handles[inodeId]
-	if found && existingHandle != nil {
-		file.isOpen++
-		return existingHandle
+	if file.isOpen > 0 {
+		existingHandle, found := wfs.handles[inodeId]
+		if found && existingHandle != nil {
+			file.isOpen++
+			return existingHandle
+		}
 	}
 
 	fileHandle = newFileHandle(file, uid, gid)
@@ -208,8 +226,14 @@ func (wfs *WFS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.
 }
 
 func (wfs *WFS) mapPbIdFromFilerToLocal(entry *filer_pb.Entry) {
+	if entry.Attributes == nil {
+		return
+	}
 	entry.Attributes.Uid, entry.Attributes.Gid = wfs.option.UidGidMapper.FilerToLocal(entry.Attributes.Uid, entry.Attributes.Gid)
 }
 func (wfs *WFS) mapPbIdFromLocalToFiler(entry *filer_pb.Entry) {
+	if entry.Attributes == nil {
+		return
+	}
 	entry.Attributes.Uid, entry.Attributes.Gid = wfs.option.UidGidMapper.LocalToFiler(entry.Attributes.Uid, entry.Attributes.Gid)
 }

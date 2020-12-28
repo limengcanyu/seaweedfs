@@ -25,6 +25,8 @@ service Seaweed {
     }
     rpc LookupEcVolume (LookupEcVolumeRequest) returns (LookupEcVolumeResponse) {
     }
+    rpc VacuumVolume (VacuumVolumeRequest) returns (VacuumVolumeResponse) {
+    }
     rpc GetMasterConfiguration (GetMasterConfigurationRequest) returns (GetMasterConfigurationResponse) {
     }
     rpc ListMasterClients (ListMasterClientsRequest) returns (ListMasterClientsResponse) {
@@ -130,6 +132,7 @@ message VolumeLocation {
     repeated uint32 new_vids = 3;
     repeated uint32 deleted_vids = 4;
     string leader = 5; // optional when leader is not itself
+    string data_center = 6; // optional when DataCenter is in use
 }
 
 message LookupVolumeRequest {
@@ -187,11 +190,6 @@ message StatisticsResponse {
 //
 // collection related
 //
-
-message StorageType {
-    string replication = 1;
-    string ttl = 2;
-}
 message Collection {
     string name = 1;
 }
@@ -268,11 +266,20 @@ message LookupEcVolumeResponse {
     repeated EcShardIdLocation shard_id_locations = 2;
 }
 
+message VacuumVolumeRequest {
+    float garbage_threshold = 1;
+}
+message VacuumVolumeResponse {
+}
+
 message GetMasterConfigurationRequest {
 }
 message GetMasterConfigurationResponse {
     string metrics_address = 1;
     uint32 metrics_interval_seconds = 2;
+    repeated StorageBackend storage_backends = 3;
+    string default_replication = 4;
+    string leader = 5;
 }
 
 message ListMasterClientsRequest {
